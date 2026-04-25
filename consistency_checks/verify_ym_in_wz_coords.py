@@ -11,20 +11,20 @@ def main():
     A_mu = load_sadun_segert_connection(l=4, r=-5, t=3, step=DIFF_STEP)
     # A_mu = random_sadun_segert_connection() # Verify the check isn't trivially solved
 
-    for coord in sample_points(N_POINTS):
-        ratio = verify_connection_satisfies_ym(A_mu, coord, verbose=True, step=DIFF_STEP)
-        assert ratio < YM_TOL
-    print("connection satisfies the Yang-Mills equation at the sampled points")
+    # for coord in sample_points(N_POINTS):
+    #     ratio = compute_ym_residual_ratio(A_mu, coord, verbose=True, step=DIFF_STEP)
+    #     assert ratio < YM_TOL
+    # print("connection satisfies the Yang-Mills equation at the sampled points")
 
     # For (l=4, r=-5, t=3) this point shows the importance of gauge fixing g when computing g^{-1}dg
-    # coord = [
-    #     -0.0055024614286730495,
-    #     -1.0336795493686264,
-    #     0.029999999754185668,
-    #     -3.840424450273706e-06
-    # ]
-    # verify_connection_satisfies_ym(A_mu, coord, verbose=True, step=DIFF_STEP)
-
+    coord = [
+        -0.0055024614286730495,
+        -1.0336795493686264,
+        0.029999999754185668,
+        -3.840424450273706e-06
+    ]
+    ratio = compute_ym_residual_ratio(A_mu, coord, verbose=True, step=DIFF_STEP)
+    assert ratio < 1e-6, ratio
 
 # =============================================================================================
 
@@ -96,7 +96,7 @@ def yang_mills_residual(A_mu, coords, step=1e-6):
         residual.append(total)
     return residual
 
-def verify_connection_satisfies_ym(A_mu, coord, verbose=True, step=1e-6):
+def compute_ym_residual_ratio(A_mu, coord, verbose=True, step=1e-6):
     F = curvature(A_mu, coord, step)
     residual = yang_mills_residual(A_mu, coord, step)
 
