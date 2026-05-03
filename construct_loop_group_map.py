@@ -20,8 +20,9 @@ ANGLE_POINTS = 30
 def main():
     l = 4 ; r = -5 ; t = 3
     A_mu = load_sadun_segert_connection(l, r, t, step=1e-8)
-    loop_samples = solve_D_zbar_g_eq_0(A_mu, DEFAULT_W)[-1]
-    gauge_fixed_loop_samples, _ = iwasawa_decompose_loop(loop_samples, mode_count=14)
+    frame_grid = solve_D_zbar_g_eq_0(A_mu, DEFAULT_W)
+    loop_samples = frame_grid[-1]
+    gauge_fixed_loop_samples, _ = iwasawa_decompose_loop(loop_samples, center_value=frame_grid[0, 0])
     verify_g_unitary_at_boundary(gauge_fixed_loop_samples, avg_tol=1e-1, max_tol=1e-1)
 
 

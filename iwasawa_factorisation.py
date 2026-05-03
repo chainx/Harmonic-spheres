@@ -1,29 +1,33 @@
 import numpy as np
 from scipy.optimize import least_squares
 
-MODE_COUNT = 120 # The number of positive (and negative) Fourier modes to keep for the Toeplitz matrix truncation
-REFINEMENT_MAX_NFEV = 40 # Maximum number of residual evaluations used by the nonlinear least-squares eta refinement.
+MODE_COUNT = 127 # The number of positive (and negative) Fourier modes to keep for the Toeplitz matrix truncation
+REFINEMENT_MAX_NFEV = 80 # Maximum number of residual evaluations used by the nonlinear least-squares eta refinement.
 
 def main():
-    loop_samples = np.load("results/jarvis_norbury_large_frame.npz")["boundary_frame"]
-    g, eta = iwasawa_decompose_loop(loop_samples, mode_count=MODE_COUNT, refinement_max_nfev=REFINEMENT_MAX_NFEV)
+    saved_frame = np.load("results/jarvis_norbury_large_frame.npz")
+    loop_samples = saved_frame["boundary_frame"]
+    center_value = saved_frame["frame_grid"][0, 0]
+    g, eta = iwasawa_decompose_loop(loop_samples, center_value=center_value, refinement_max_nfev=REFINEMENT_MAX_NFEV)
     verify_g_unitary_at_boundary(g, avg_tol=1e-1, max_tol=1e-1)
 
 
 # =============================================================================================
 
 
-def iwasawa_decompose_loop(loop_samples, mode_count, refinement_max_nfev):
+def iwasawa_decompose_loop(loop_samples, refinement_max_nfev=REFINEMENT_MAX_NFEV, center_value=None, mode_count=None):
     """ Decompose loop group element into:
             -g which is unitary at the boundary,
             -eta which is the boundary value of a holomorphic function from the interior.
     """
     sample_count, matrix_size, _ = loop_samples.shape
+    if not mode_count: mode_count = sample_count//2 - 1
+    
     metric_samples = np.einsum("kab,kac->kbc", loop_samples.conj(), loop_samples) # compute H = g^\dagger g
     toeplitz_matrix = construct_truncated_toeplitz_matrix(metric_samples, mode_count, sample_count, matrix_size)
     cholesky_matrix = np.linalg.cholesky(toeplitz_matrix)
     eta = extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size)
-    eta = refine_holomorphic_factor(eta, metric_samples, mode_count, refinement_max_nfev)
+    eta = refine_holomorphic_factor(eta, metric_samples, mode_count, refinement_max_nfev, center_value=center_value)
     g = multiply_by_pointwise_inverse_on_right(loop_samples, eta)
     return g, eta
 
@@ -64,25 +68,37 @@ def extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size):
     phases = np.exp(1j * phi[:, None] * modes[None, :])
     return np.einsum("kn,nab->kab", phases, eta_coeff)
 
-def refine_holomorphic_factor(eta, metric_samples, mode_count, max_nfev):
+def refine_holomorphic_factor(eta, metric_samples, mode_count, max_nfev, center_value):
     """ Minimize the relative metric residual over holomorphic Fourier coefficients. """
     sample_count, matrix_size, _ = eta.shape
     coefficient_shape = (mode_count + 1, matrix_size, matrix_size)
-    coefficient_size = np.prod(coefficient_shape)
     modes = np.arange(mode_count + 1)
     phi = np.linspace(0.0, 2.0*np.pi, sample_count, endpoint=False)
     phases = np.exp(1j * phi[:, None] * modes[None, :])
 
     metric_inv_sqrt = hermitian_matrix_power(metric_samples, -0.5)
     initial_coefficients = np.fft.fft(eta, axis=0)[:mode_count + 1] / sample_count
+    initial_coefficients[0] = center_value
+    free_coefficient_shape = (mode_count, matrix_size, matrix_size)
+    free_coefficient_size = np.prod(free_coefficient_shape)
 
     def pack_coefficients(coefficients):
-        return np.concatenate([coefficients.real.ravel(), coefficients.imag.ravel()])
+        if center_value is None:
+            free_coefficients = coefficients
+        else:
+            free_coefficients = coefficients[1:]
+        return np.concatenate([free_coefficients.real.ravel(), free_coefficients.imag.ravel()])
 
     def unpack_coefficients(packed_coefficients):
-        real_part = packed_coefficients[:coefficient_size].reshape(coefficient_shape)
-        imaginary_part = packed_coefficients[coefficient_size:].reshape(coefficient_shape)
-        return real_part + 1j*imaginary_part
+        real_part = packed_coefficients[:free_coefficient_size].reshape(free_coefficient_shape)
+        imaginary_part = packed_coefficients[free_coefficient_size:].reshape(free_coefficient_shape)
+        free_coefficients = real_part + 1j*imaginary_part
+        if center_value is None:
+            return free_coefficients
+        coefficients = np.empty(coefficient_shape, dtype=complex)
+        coefficients[0] = center_value
+        coefficients[1:] = free_coefficients
+        return coefficients
 
     def evaluate_holomorphic_factor(coefficients):
         return np.einsum("kn,nab->kab", phases, coefficients)
