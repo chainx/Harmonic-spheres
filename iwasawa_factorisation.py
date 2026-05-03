@@ -1,32 +1,29 @@
 import numpy as np
+from scipy.optimize import least_squares
 
 MODE_COUNT = 120 # The number of positive (and negative) Fourier modes to keep for the Toeplitz matrix truncation
-FACTOR_REFINEMENT_ITERATIONS = 3000
+REFINEMENT_MAX_NFEV = 40 # Maximum number of residual evaluations used by the nonlinear least-squares eta refinement.
 
 def main():
     loop_samples = np.load("results/jarvis_norbury_large_frame.npz")["boundary_frame"]
-    g, eta = iwasawa_decompose_loop(
-        loop_samples,
-        mode_count=MODE_COUNT,
-        refinement_iterations=FACTOR_REFINEMENT_ITERATIONS,
-    )
+    g, eta = iwasawa_decompose_loop(loop_samples, mode_count=MODE_COUNT, refinement_max_nfev=REFINEMENT_MAX_NFEV)
     verify_g_unitary_at_boundary(g, avg_tol=1e-1, max_tol=1e-1)
 
 
 # =============================================================================================
 
 
-def iwasawa_decompose_loop(loop_samples, mode_count, refinement_iterations=FACTOR_REFINEMENT_ITERATIONS):
+def iwasawa_decompose_loop(loop_samples, mode_count, refinement_max_nfev):
     """ Decompose loop group element into:
             -g which is unitary at the boundary,
             -eta which is the boundary value of a holomorphic function from the interior.
     """
     sample_count, matrix_size, _ = loop_samples.shape
-    metric_samples = np.einsum("kab,kac->kbc", loop_samples.conj(), loop_samples)
+    metric_samples = np.einsum("kab,kac->kbc", loop_samples.conj(), loop_samples) # compute H = g^\dagger g
     toeplitz_matrix = construct_truncated_toeplitz_matrix(metric_samples, mode_count, sample_count, matrix_size)
     cholesky_matrix = np.linalg.cholesky(toeplitz_matrix)
     eta = extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size)
-    eta = refine_holomorphic_factor(eta, metric_samples, mode_count, refinement_iterations)
+    eta = refine_holomorphic_factor(eta, metric_samples, mode_count, refinement_max_nfev)
     g = multiply_by_pointwise_inverse_on_right(loop_samples, eta)
     return g, eta
 
@@ -67,20 +64,44 @@ def extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size):
     phases = np.exp(1j * phi[:, None] * modes[None, :])
     return np.einsum("kn,nab->kab", phases, eta_coeff)
 
-def refine_holomorphic_factor(eta, metric_samples, mode_count, iterations):
-    """ Refine eta by alternating pointwise metric correction with holomorphic projection. """
-    if iterations == 0: return eta
+def refine_holomorphic_factor(eta, metric_samples, mode_count, max_nfev):
+    """ Minimize the relative metric residual over holomorphic Fourier coefficients. """
+    sample_count, matrix_size, _ = eta.shape
+    coefficient_shape = (mode_count + 1, matrix_size, matrix_size)
+    coefficient_size = np.prod(coefficient_shape)
+    modes = np.arange(mode_count + 1)
+    phi = np.linspace(0.0, 2.0*np.pi, sample_count, endpoint=False)
+    phases = np.exp(1j * phi[:, None] * modes[None, :])
 
-    target_metric_sqrt = hermitian_matrix_power(metric_samples, 0.5)
+    metric_inv_sqrt = hermitian_matrix_power(metric_samples, -0.5)
+    initial_coefficients = np.fft.fft(eta, axis=0)[:mode_count + 1] / sample_count
 
-    for _ in range(iterations):
-        eta_metric = np.einsum("kab,kac->kbc", eta.conj(), eta)
-        eta_metric_inv_sqrt = hermitian_matrix_power(eta_metric, -0.5)
-        unitary_part = np.einsum("kab,kbc->kac", eta, eta_metric_inv_sqrt)
-        pointwise_corrected_eta = np.einsum("kab,kbc->kac", unitary_part, target_metric_sqrt)
-        eta = project_to_holomorphic_modes(pointwise_corrected_eta, mode_count)
+    def pack_coefficients(coefficients):
+        return np.concatenate([coefficients.real.ravel(), coefficients.imag.ravel()])
 
-    return eta
+    def unpack_coefficients(packed_coefficients):
+        real_part = packed_coefficients[:coefficient_size].reshape(coefficient_shape)
+        imaginary_part = packed_coefficients[coefficient_size:].reshape(coefficient_shape)
+        return real_part + 1j*imaginary_part
+
+    def evaluate_holomorphic_factor(coefficients):
+        return np.einsum("kn,nab->kab", phases, coefficients)
+
+    def relative_metric_residual(packed_coefficients):
+        candidate_eta = evaluate_holomorphic_factor(unpack_coefficients(packed_coefficients))
+        candidate_metric = np.einsum("kab,kac->kbc", candidate_eta.conj(), candidate_eta)
+        weighted_residual = np.einsum(
+            "kab,kbc,kcd->kad",
+            metric_inv_sqrt,
+            candidate_metric - metric_samples,
+            metric_inv_sqrt,
+        )
+        return np.concatenate([weighted_residual.real.ravel(), weighted_residual.imag.ravel()])
+
+    result = least_squares(relative_metric_residual, pack_coefficients(initial_coefficients),
+        method="trf", max_nfev=max_nfev, x_scale="jac", ftol=1e-12, xtol=1e-12, gtol=1e-12,
+    )
+    return evaluate_holomorphic_factor(unpack_coefficients(result.x))
 
 def hermitian_matrix_power(matrix_samples, exponent):
     """ Apply a real power to Hermitian positive semidefinite matrix samples. """
@@ -97,13 +118,6 @@ def hermitian_matrix_power(matrix_samples, exponent):
             eigenvectors * (eigenvalues**exponent)[None, :]
         ) @ eigenvectors.conj().T
     return powered_samples
-
-def project_to_holomorphic_modes(loop_samples, mode_count):
-    """ Keep only non-negative Fourier modes through mode_count. """
-    sample_count = loop_samples.shape[0]
-    fourier_coef = np.fft.fft(loop_samples, axis=0) / sample_count
-    fourier_coef[mode_count + 1:] = 0.0
-    return np.fft.ifft(sample_count * fourier_coef, axis=0)
 
 def multiply_by_pointwise_inverse_on_right(left_factors, right_factors):
     """ Return left_factors @ inv(right_factors) without explicitly forming inverses. """
