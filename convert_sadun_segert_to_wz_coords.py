@@ -6,6 +6,10 @@ This file reconstructs
     A = A_u du + A_v dv + A_x dx + A_y dy
 
 from the saved Sadun-Segert function a_3.
+
+The reduced Sadun-Segert ansatz is written in an so(3) basis.  The
+Jarvis-Norbury construction assumes a unitary gauge group, so this module
+exports the connection in the corresponding anti-Hermitian su(2) basis.
 """
 
 from pathlib import Path
@@ -19,7 +23,7 @@ from construct_sadun_segert_ym_solution import construct_a3_and_da3_from_fourier
 
 DIFF_STEP = 5e-8 # Default step size for numerical differentiation
 
-# Lie algebra generators of so(3)
+# Lie algebra generators of so(3), used to extract Maurer-Cartan coefficients.
 T1 = np.matrix([[0, 0, 0], [0, 0,-1], [ 0, 1, 0]])
 T2 = np.matrix([[0, 0, 1], [0, 0, 0], [-1, 0, 0]])
 T3 = np.matrix([[0,-1, 0], [1, 0, 0], [ 0, 0, 0]])
@@ -28,6 +32,16 @@ T = [T1, T2, T3]
 assert np.array_equal(T1 * T2 - T2 * T1, T3)
 assert np.array_equal(T2 * T3 - T3 * T2, T1)
 assert np.array_equal(T3 * T1 - T1 * T3, T2)
+
+# Corresponding su(2) generators under T_i -> -i sigma_i / 2.
+S1 = -0.5j * np.array([[0, 1], [1, 0]], dtype=complex)
+S2 = -0.5j * np.array([[0, -1j], [1j, 0]], dtype=complex)
+S3 = -0.5j * np.array([[1, 0], [0, -1]], dtype=complex)
+S = [S1, S2, S3]
+assert np.allclose(S1 @ S2 - S2 @ S1, S3)
+assert np.allclose(S2 @ S3 - S3 @ S2, S1)
+assert np.allclose(S3 @ S1 - S1 @ S3, S2)
+assert all(np.allclose(Si.conj().T, -Si) for Si in S)
 
 # Basis for the 5-dimensional space of real symmetric traceless 3x3 matrices.
 # These are mutually orthogonal and all have the same Frobenius norm.
@@ -185,7 +199,7 @@ def connection_in_wz_coords(a3, step=DIFF_STEP):
         A = []
         for mu in range(4):
             coeff = extract_basis_vector_coeff(g_inv_dg[mu])
-            A.append( -sum([coeff[i] * a[i] * T[i] for i in range(3)]) )
+            A.append( -sum([coeff[i] * a[i] * S[i] for i in range(3)]) )
         return A
     return A_mu
 

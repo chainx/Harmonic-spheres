@@ -8,28 +8,23 @@
 import numpy as np
 
 from convert_sadun_segert_to_wz_coords import load_sadun_segert_connection
+from iwasawa_factorisation import iwasawa_decompose_loop
 
 π = np.pi
 
 DEFAULT_W = 0.2 + 0.3j
 DISK_RADIUS = 0.999
-RADIAL_POINTS = 10
-ANGLE_POINTS = 24
+RADIAL_POINTS = 12
+ANGLE_POINTS = 30
+CONTINUATION_BOUNDARY_TOLERANCE = 1e-10
+CONTINUATION_REGULARIZATION = 1e-8
+HIGH_MODE_REGULARIZATION = 0.0
 
 def main():
     l = 4 ; r = -5 ; t = 3
     A_mu = load_sadun_segert_connection(l, r, t, step=1e-8)
-    boundary_frame = solve_D_zbar_g_eq_0(A_mu, DEFAULT_W)
-
-
-# =============================================================================================
-
-
-def gauge_fix_boundary_frame(boundary_frame):
-    """ The remaining holomorphic gauge freedom g ↦ gη is fixed by 
-        imposing the condition that g is unitary at the boundary.
-    """
-    pass
+    loop_samples = solve_D_zbar_g_eq_0(A_mu, DEFAULT_W)
+    gauge_fixed_loop_samples, _ = iwasawa_decompose_loop(loop_samples)
 
 
 # =============================================================================================
@@ -37,7 +32,11 @@ def gauge_fix_boundary_frame(boundary_frame):
 
 def solve_D_zbar_g_eq_0(A_mu, w=DEFAULT_W, 
     disk_radius=DISK_RADIUS, radial_points=RADIAL_POINTS, angle_points=ANGLE_POINTS):
-    """Construct a gauge-fixed interior frame before imposing boundary unitarity."""
+    """Return the full disk frame before imposing boundary unitarity.
+
+    The returned array has shape
+    (radial_points, angle_points, matrix_size, matrix_size).
+    """
 
     # z = rho exp(i phi)
     rho, d_rho = chebyshev_lobatto_grid(disk_radius, radial_points)
@@ -49,13 +48,14 @@ def solve_D_zbar_g_eq_0(A_mu, w=DEFAULT_W,
         A_mu, w, rho, phi, d_rho, d_phi, matrix_size
     )
 
-    flattened_frame_grid, *_ = np.linalg.lstsq(system_matrix, boundary_data, rcond=None)
-    frame_grid = flattened_frame_grid.reshape(
+    flattened_disk_frame, *_ = np.linalg.lstsq(system_matrix, boundary_data, rcond=None)
+    frame_grid = flattened_disk_frame.reshape(
         radial_points, angle_points, matrix_size, matrix_size,
     )
-    boundary_frame = frame_grid[-1]
+    return frame_grid
 
-    return boundary_frame
+
+# =============================================================================================
 
 
 def build_collocation_system(A_mu, w, rho, phi, d_rho, d_phi, matrix_size):
