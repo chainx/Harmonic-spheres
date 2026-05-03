@@ -8,7 +8,7 @@
 import numpy as np
 
 from convert_sadun_segert_to_wz_coords import load_sadun_segert_connection
-from iwasawa_factorisation import iwasawa_decompose_loop
+from iwasawa_factorisation import iwasawa_decompose_loop, verify_g_unitary_at_boundary
 
 π = np.pi
 
@@ -16,15 +16,13 @@ DEFAULT_W = 0.2 + 0.3j
 DISK_RADIUS = 0.999
 RADIAL_POINTS = 12
 ANGLE_POINTS = 30
-CONTINUATION_BOUNDARY_TOLERANCE = 1e-10
-CONTINUATION_REGULARIZATION = 1e-8
-HIGH_MODE_REGULARIZATION = 0.0
 
 def main():
     l = 4 ; r = -5 ; t = 3
     A_mu = load_sadun_segert_connection(l, r, t, step=1e-8)
-    loop_samples = solve_D_zbar_g_eq_0(A_mu, DEFAULT_W)
-    gauge_fixed_loop_samples, _ = iwasawa_decompose_loop(loop_samples)
+    loop_samples = solve_D_zbar_g_eq_0(A_mu, DEFAULT_W)[-1]
+    gauge_fixed_loop_samples, _ = iwasawa_decompose_loop(loop_samples, mode_count=14)
+    verify_g_unitary_at_boundary(gauge_fixed_loop_samples, avg_tol=1e-1, max_tol=1e-1)
 
 
 # =============================================================================================

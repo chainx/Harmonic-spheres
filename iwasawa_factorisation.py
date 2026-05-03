@@ -1,17 +1,22 @@
 import numpy as np
 
 MODE_COUNT = 120 # The number of positive (and negative) Fourier modes to keep for the Toeplitz matrix truncation
+FACTOR_REFINEMENT_ITERATIONS = 3000
 
 def main():
     loop_samples = np.load("results/jarvis_norbury_large_frame.npz")["boundary_frame"]
-    g, eta = iwasawa_decompose_loop(loop_samples, mode_count=MODE_COUNT)
+    g, eta = iwasawa_decompose_loop(
+        loop_samples,
+        mode_count=MODE_COUNT,
+        refinement_iterations=FACTOR_REFINEMENT_ITERATIONS,
+    )
     verify_g_unitary_at_boundary(g, avg_tol=1e-1, max_tol=1e-1)
 
 
 # =============================================================================================
 
 
-def iwasawa_decompose_loop(loop_samples, mode_count):
+def iwasawa_decompose_loop(loop_samples, mode_count, refinement_iterations=FACTOR_REFINEMENT_ITERATIONS):
     """ Decompose loop group element into:
             -g which is unitary at the boundary,
             -eta which is the boundary value of a holomorphic function from the interior.
@@ -20,8 +25,9 @@ def iwasawa_decompose_loop(loop_samples, mode_count):
     metric_samples = np.einsum("kab,kac->kbc", loop_samples.conj(), loop_samples)
     toeplitz_matrix = construct_truncated_toeplitz_matrix(metric_samples, mode_count, sample_count, matrix_size)
     cholesky_matrix = np.linalg.cholesky(toeplitz_matrix)
-    eta = extract_eta(cholesky_matrix, sample_count, matrix_size)
-    g = np.einsum("kab,kbc->kac", loop_samples, np.linalg.inv(eta))
+    eta = extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size)
+    eta = refine_holomorphic_factor(eta, metric_samples, mode_count, refinement_iterations)
+    g = multiply_by_pointwise_inverse_on_right(loop_samples, eta)
     return g, eta
 
 def construct_truncated_toeplitz_matrix(loop_samples, mode_count, sample_count, matrix_size):
@@ -46,7 +52,7 @@ def extract_fourier_coefficients(loop_samples, mode_count, sample_count):
     fourier_coef = np.fft.fft(loop_samples, axis=0) / sample_count
     return np.concatenate((fourier_coef[-mode_count:], fourier_coef[:mode_count+1]))
 
-def extract_eta(cholesky_matrix, sample_count, matrix_size):
+def extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size):
     """ Extract boundary value of holomorphic matrix-valued function eta from a Toeplitz Cholesky factor. """
     block_count = cholesky_matrix.shape[0] // matrix_size
     last_block_row = slice((block_count - 1) * matrix_size, block_count * matrix_size)
@@ -60,6 +66,51 @@ def extract_eta(cholesky_matrix, sample_count, matrix_size):
     phi = np.linspace(0.0, 2.0*np.pi, sample_count, endpoint=False)
     phases = np.exp(1j * phi[:, None] * modes[None, :])
     return np.einsum("kn,nab->kab", phases, eta_coeff)
+
+def refine_holomorphic_factor(eta, metric_samples, mode_count, iterations):
+    """ Refine eta by alternating pointwise metric correction with holomorphic projection. """
+    if iterations == 0: return eta
+
+    target_metric_sqrt = hermitian_matrix_power(metric_samples, 0.5)
+
+    for _ in range(iterations):
+        eta_metric = np.einsum("kab,kac->kbc", eta.conj(), eta)
+        eta_metric_inv_sqrt = hermitian_matrix_power(eta_metric, -0.5)
+        unitary_part = np.einsum("kab,kbc->kac", eta, eta_metric_inv_sqrt)
+        pointwise_corrected_eta = np.einsum("kab,kbc->kac", unitary_part, target_metric_sqrt)
+        eta = project_to_holomorphic_modes(pointwise_corrected_eta, mode_count)
+
+    return eta
+
+def hermitian_matrix_power(matrix_samples, exponent):
+    """ Apply a real power to Hermitian positive semidefinite matrix samples. """
+    powered_samples = np.empty_like(matrix_samples)
+    eigenvalue_floor = np.finfo(float).tiny
+    for sample_index, matrix in enumerate(matrix_samples):
+        hermitian_matrix = 0.5 * (matrix + matrix.conj().T)
+        eigenvalues, eigenvectors = np.linalg.eigh(hermitian_matrix)
+        if exponent < 0:
+            eigenvalues = np.maximum(eigenvalues, eigenvalue_floor)
+        else:
+            eigenvalues = np.maximum(eigenvalues, 0.0)
+        powered_samples[sample_index] = (
+            eigenvectors * (eigenvalues**exponent)[None, :]
+        ) @ eigenvectors.conj().T
+    return powered_samples
+
+def project_to_holomorphic_modes(loop_samples, mode_count):
+    """ Keep only non-negative Fourier modes through mode_count. """
+    sample_count = loop_samples.shape[0]
+    fourier_coef = np.fft.fft(loop_samples, axis=0) / sample_count
+    fourier_coef[mode_count + 1:] = 0.0
+    return np.fft.ifft(sample_count * fourier_coef, axis=0)
+
+def multiply_by_pointwise_inverse_on_right(left_factors, right_factors):
+    """ Return left_factors @ inv(right_factors) without explicitly forming inverses. """
+    product = np.empty_like(left_factors)
+    for sample_index, (left_factor, right_factor) in enumerate(zip(left_factors, right_factors)):
+        product[sample_index] = np.linalg.solve(right_factor.T, left_factor.T).T
+    return product
 
 def verify_g_unitary_at_boundary(g, avg_tol, max_tol):
     """ Check the average and max Frobenius norms of the residuals g g^\dagger - I. """
