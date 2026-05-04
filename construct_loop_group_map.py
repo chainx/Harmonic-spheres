@@ -58,7 +58,7 @@ def solve_D_zbar_g_eq_0(A_mu, w=DEFAULT_W,
         A_mu, w, rho, phi, d_rho, d_phi, matrix_size
     )
 
-    flattened_disk_frame, *_ = np.linalg.lstsq(system_matrix, boundary_data, rcond=None)
+    flattened_disk_frame = np.linalg.solve(system_matrix, boundary_data)
     frame_grid = flattened_disk_frame.reshape(
         radial_points, angle_points, matrix_size, matrix_size,
     )
