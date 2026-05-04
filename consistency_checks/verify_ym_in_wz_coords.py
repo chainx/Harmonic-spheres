@@ -1,30 +1,33 @@
 import numpy as np
 
-from convert_sadun_segert_to_wz_coords import load_sadun_segert_connection, random_sadun_segert_connection
+from construct_bpst_in_wz_coords import load_bpst_connection
+from construct_sadun_segert_in_wz_coords import load_sadun_segert_connection, random_sadun_segert_connection
 
 DIFF_STEP = 5e-6 # Default step size for numerical differentiation
 
-YM_TOL = 1e-5 # Maximum discrepancy allowed before an error is thrown
+TOL = 1e-5 # Maximum discrepancy allowed before an error is thrown
 N_POINTS = 200 # Number of points to check the Yang-Mills equation at
 
 def main():
+    # A_mu = load_bpst_connection()
     A_mu = load_sadun_segert_connection(l=4, r=-5, t=3, step=DIFF_STEP)
     # A_mu = random_sadun_segert_connection() # Verify the check isn't trivially solved
 
-    # for coord in sample_points(N_POINTS):
-    #     ratio = compute_ym_residual_ratio(A_mu, coord, verbose=True, step=DIFF_STEP)
-    #     assert ratio < YM_TOL
-    # print("connection satisfies the Yang-Mills equation at the sampled points")
+    check = "SD"
+    for coord in sample_points(N_POINTS):
+        ratio = compute_residual_ratio(A_mu, coord, check, verbose=True, step=DIFF_STEP)
+        assert ratio < TOL
+    print(f"Connection satisfies the {check} equation at the sampled points")
 
     # For (l=4, r=-5, t=3) this point shows the importance of gauge fixing g when computing g^{-1}dg
-    coord = [
-        -0.0055024614286730495,
-        -1.0336795493686264,
-        0.029999999754185668,
-        -3.840424450273706e-06
-    ]
-    ratio = compute_ym_residual_ratio(A_mu, coord, verbose=True, step=DIFF_STEP)
-    assert ratio < 1e-6, ratio
+    # coord = [
+    #     -0.0055024614286730495,
+    #     -1.0336795493686264,
+    #     0.029999999754185668,
+    #     -3.840424450273706e-06
+    # ]
+    # ratio = compute_ym_residual_ratio(A_mu, coord, verbose=True, step=DIFF_STEP)
+    # assert ratio < 1e-6, ratio
 
 # =============================================================================================
 
@@ -63,14 +66,14 @@ def sqrt_det_metric(coords):
     sphere_factor, _, disk_factor, _ = metric_diagonal(coords)
     return sphere_factor * disk_factor
 
-def yang_mills_residual(A_mu, coords, step=1e-6):
+def yang_mills_tensor(A_mu, coords, step=1e-6):
     coords = np.array(coords, dtype=float)
     A = array_connection(A_mu, coords)
     F = curvature(A_mu, coords, step)
     g_inv = 1 / metric_diagonal(coords)
     sqrt_g = sqrt_det_metric(coords)
 
-    residual = []
+    ym_tensor = []
     for nu in range(4):
         total = np.zeros(A[0].shape, dtype=np.result_type(*[matrix.dtype for matrix in A]))
         for mu in range(4):
@@ -93,13 +96,38 @@ def yang_mills_residual(A_mu, coords, step=1e-6):
             F_raised = g_inv[mu] * g_inv[nu] * F[mu][nu]
             total += A[mu] @ F_raised - F_raised @ A[mu]
 
-        residual.append(total)
-    return residual
+        ym_tensor.append(total)
+    return ym_tensor
 
-def compute_ym_residual_ratio(A_mu, coord, verbose=True, step=1e-6):
+def self_duality_tensor(A_mu, coords, step=1e-6):
+    u, v, x, y = coords; F = curvature(A_mu, coords, step)
+    scale = ((1 + u*u + v*v) / (1 - x*x - y*y))**2
+    return [
+        (F[0][2] + 1j*F[0][3] + 1j*F[1][2] - F[1][3]) / 4, # F_wbar zbar
+        (F[0][2] - 1j*F[0][3] - 1j*F[1][2] - F[1][3]) / 4, # F_w z
+        0.5j * (F[2][3] - scale * F[0][1]),                 # F_z zbar - scale F_w wbar
+    ]
+
+def anti_self_duality_tensor(A_mu, coords, step=1e-6):
+    u, v, x, y = coords; F = curvature(A_mu, coords, step)
+    scale = ((1 + u*u + v*v) / (1 - x*x - y*y))**2
+    return [
+        (F[0][2] + 1j*F[0][3] - 1j*F[1][2] + F[1][3]) / 4, # F_w zbar
+        (F[0][2] - 1j*F[0][3] + 1j*F[1][2] + F[1][3]) / 4, # F_wbar z
+        0.5j * (F[2][3] - scale * F[0][1]),                # F_z zbar - scale F_w wbar
+    ]
+
+def compute_residual_ratio(A_mu, coord, check=None, verbose=True, step=1e-6):
     F = curvature(A_mu, coord, step)
-    residual = yang_mills_residual(A_mu, coord, step)
-
+    if check == "YM":
+        residual = yang_mills_tensor(A_mu, coord, step)
+    elif check == "SD":
+        residual = self_duality_tensor(A_mu, coord, step)
+    elif check == "ASD":
+        residual = anti_self_duality_tensor(A_mu, coord, step)
+    else:
+        raise ValueError('Check must be either: "YM", "SD" or "ASD"')    
+    
     curvature_norm = max_matrix_norm([F[mu][nu] for mu in range(4) for nu in range(mu + 1, 4)])
     residual_norm = max_matrix_norm(residual)
     ratio = residual_norm / curvature_norm

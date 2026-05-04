@@ -7,24 +7,35 @@
 
 import numpy as np
 
-from convert_sadun_segert_to_wz_coords import load_sadun_segert_connection
+from pathlib import Path
+RESULTS_PATH = Path.cwd() / "results"
+RESULTS_PATH.mkdir(parents=True, exist_ok=True)
+
+from construct_sadun_segert_in_wz_coords import load_sadun_segert_connection
+from construct_bpst_in_wz_coords import load_bpst_connection
 from iwasawa_factorisation import iwasawa_decompose_loop, verify_g_unitary_at_boundary
 
 π = np.pi
 
 DEFAULT_W = 0.2 + 0.3j
+STEP = 5e-5
+
 DISK_RADIUS = 0.999
-RADIAL_POINTS = 12
-ANGLE_POINTS = 30
+
+RADIAL_POINTS = 36
+ANGLE_POINTS = 256
 
 def main():
-    l = 4 ; r = -5 ; t = 3
-    A_mu = load_sadun_segert_connection(l, r, t, step=1e-8)
-    frame_grid = solve_D_zbar_g_eq_0(A_mu, DEFAULT_W)
-    loop_samples = frame_grid[-1]
-    gauge_fixed_loop_samples, _ = iwasawa_decompose_loop(loop_samples, center_value=frame_grid[0, 0])
-    verify_g_unitary_at_boundary(gauge_fixed_loop_samples, avg_tol=1e-1, max_tol=1e-1)
+    # A_mu = load_sadun_segert_connection(l=4, r=-5, t=3, step=1e-8)
+    A_mu = load_bpst_connection()
 
+    for w in [DEFAULT_W, DEFAULT_W-STEP, DEFAULT_W+STEP]:
+        frame_grid = solve_D_zbar_g_eq_0(A_mu, w)
+        loop_samples = frame_grid[-1]
+        gauge_fixed_loop_samples, _ = iwasawa_decompose_loop(loop_samples, center_value=frame_grid[0, 0])
+        np.save(f"results/bpst_JN_frame_w={w}.npy", gauge_fixed_loop_samples)
+        
+        verify_g_unitary_at_boundary(gauge_fixed_loop_samples, avg_tol=1e-4, max_tol=1e-4)
 
 # =============================================================================================
 
