@@ -7,6 +7,7 @@
 
 import numpy as np
 
+from datetime import datetime
 from pathlib import Path
 RESULTS_PATH = Path.cwd() / "results"
 RESULTS_PATH.mkdir(parents=True, exist_ok=True)
@@ -18,24 +19,35 @@ from iwasawa_factorisation import iwasawa_decompose_loop, verify_g_unitary_at_bo
 π = np.pi
 
 DEFAULT_W = 0.2 + 0.3j
-STEP = 5e-5
+STEP = 5e-4
 
 DISK_RADIUS = 0.999
 
 RADIAL_POINTS = 36
-ANGLE_POINTS = 256
+ANGLE_POINTS = 500
 
 def main():
     # A_mu = load_sadun_segert_connection(l=4, r=-5, t=3, step=1e-8)
     A_mu = load_bpst_connection()
 
-    for w in [DEFAULT_W, DEFAULT_W-STEP, DEFAULT_W+STEP]:
-        frame_grid = solve_D_zbar_g_eq_0(A_mu, w)
-        loop_samples = frame_grid[-1]
-        gauge_fixed_loop_samples, _ = iwasawa_decompose_loop(loop_samples, center_value=frame_grid[0, 0])
-        np.save(f"results/bpst_JN_frame_w={w}.npy", gauge_fixed_loop_samples)
+    radial_resolution = [20,30,40,50,60]
+    angular_resolution = [200,300,400,500,600,700,800]
+
+    print(f"Starting at {datetime.now().strftime('%H:%M:%S')}")
+    for radial_points in radial_resolution:
+        for angle_points in angular_resolution:
+            rho = chebyshev_lobatto_grid(DISK_RADIUS, radial_points)[0]
+            phi = np.linspace(0.0, 2.0*np.pi, angle_points, endpoint=False)
+            frame_grid = solve_D_zbar_g_eq_0(A_mu, DEFAULT_W, radial_points=radial_points, angle_points=angle_points)
+            loop_samples = frame_grid[-1]
+            gauge_fixed_loop_samples, eta = iwasawa_decompose_loop(loop_samples, rho, center_value=frame_grid[0, 0])
+            gauge_fixed_frame_grid = multiply_by_pointwise_inverse_on_right(frame_grid, eta)
+            np.savez(RESULTS_PATH/f"bpst_JN_frame_w={DEFAULT_W}_{radial_points}-{angle_points}.npz", 
+                     g=gauge_fixed_frame_grid, eta=eta, rho=rho, phi=phi, w=DEFAULT_W
+            )
+            print(f"Finished radial_points={radial_points}, angle_points={angle_points} at {datetime.now().strftime('%H:%M:%S')}")
         
-        verify_g_unitary_at_boundary(gauge_fixed_loop_samples, avg_tol=1e-4, max_tol=1e-4)
+            verify_g_unitary_at_boundary(gauge_fixed_loop_samples, avg_tol=1e-4, max_tol=1e-4)
 
 # =============================================================================================
 
@@ -176,6 +188,10 @@ def vector_slice(j, k, angle_points, matrix_size):
 
 def max_matrix_norm(matrix_list):
     return max(np.linalg.norm(matrix, ord="fro") for matrix in matrix_list)
+
+def multiply_by_pointwise_inverse_on_right(left_factors, right_factors):
+    """ Return left_factors @ inv(right_factors) over a matrix-valued grid. """
+    return np.linalg.solve(right_factors.swapaxes(-1, -2), left_factors.swapaxes(-1, -2)).swapaxes(-1, -2)
 
 
 if __name__ == "__main__":
