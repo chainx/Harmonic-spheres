@@ -2,7 +2,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 MODE_COUNT = 127 # The number of positive (and negative) Fourier modes to keep for the Toeplitz matrix truncation
-REFINEMENT_MAX_NFEV = 80 # Maximum number of residual evaluations used by the nonlinear least-squares eta refinement.
+REFINEMENT_MAX_NFEV = 80 # Maximum number of residual evaluations used by the nonlinear least-squares inverse-factor refinement.
 
 def main():
     saved_frame = np.load("results/jarvis_norbury_large_frame.npz")
@@ -18,7 +18,7 @@ def main():
 def iwasawa_decompose_loop(loop_samples, disk_radii, refinement_max_nfev=REFINEMENT_MAX_NFEV, center_value=None, mode_count=None):
     """ Decompose loop group element into:
             -g which is unitary at the boundary,
-            -eta which is the holomorphic factor on the full disk grid.
+            -eta whose inverse is solved for holomorphically on the full disk grid.
     """
     sample_count, matrix_size, _ = loop_samples.shape
     if not mode_count: mode_count = sample_count//2 - 1
@@ -26,10 +26,12 @@ def iwasawa_decompose_loop(loop_samples, disk_radii, refinement_max_nfev=REFINEM
     metric_samples = np.einsum("kab,kac->kbc", loop_samples.conj(), loop_samples) # compute H = g^\dagger g
     toeplitz_matrix = construct_truncated_toeplitz_matrix(metric_samples, mode_count, sample_count, matrix_size)
     cholesky_matrix = np.linalg.cholesky(toeplitz_matrix)
-    boundary_eta, eta_coeff = extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size)
-    boundary_eta, eta_coeff = refine_holomorphic_factor(boundary_eta, metric_samples, mode_count, refinement_max_nfev, center_value=center_value)
-    g = multiply_by_pointwise_inverse_on_right(loop_samples, boundary_eta)
-    return g, evaluate_holomorphic_factor_on_disk(eta_coeff, disk_radii, sample_count)
+    boundary_eta, _ = extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size)
+    boundary_q, q_coeff = refine_inverse_holomorphic_factor(
+        invert_matrix_samples(boundary_eta), metric_samples, mode_count, refinement_max_nfev,
+    )
+    g = np.einsum("kab,kbc->kac", loop_samples, boundary_q)
+    return g, invert_matrix_samples(evaluate_holomorphic_factor_on_disk(q_coeff, disk_radii, sample_count))
 
 def construct_truncated_toeplitz_matrix(loop_samples, mode_count, sample_count, matrix_size):
     """ Constructs (mode_count+1)x(mode_count+1) Toepliz matrix from the sampled loop group map values. """
@@ -68,57 +70,42 @@ def extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size):
     phases = np.exp(1j * phi[:, None] * modes[None, :])
     return np.einsum("kn,nab->kab", phases, eta_coeff), eta_coeff
 
-def refine_holomorphic_factor(eta, metric_samples, mode_count, max_nfev, center_value):
-    """ Minimize the relative metric residual over holomorphic Fourier coefficients. """
-    sample_count, matrix_size, _ = eta.shape
+def refine_inverse_holomorphic_factor(q, metric_samples, mode_count, max_nfev):
+    """ Minimize the boundary unitarity residual over holomorphic Fourier coefficients. """
+    sample_count, matrix_size, _ = q.shape
     coefficient_shape = (mode_count + 1, matrix_size, matrix_size)
     modes = np.arange(mode_count + 1)
     phi = np.linspace(0.0, 2.0*np.pi, sample_count, endpoint=False)
     phases = np.exp(1j * phi[:, None] * modes[None, :])
 
-    metric_inv_sqrt = hermitian_matrix_power(metric_samples, -0.5)
-    initial_coefficients = np.fft.fft(eta, axis=0)[:mode_count + 1] / sample_count
-    initial_coefficients[0] = center_value
-    free_coefficient_shape = (mode_count, matrix_size, matrix_size)
-    free_coefficient_size = np.prod(free_coefficient_shape)
+    initial_coefficients = np.fft.fft(q, axis=0)[:mode_count + 1] / sample_count
+    coefficient_size = np.prod(coefficient_shape)
 
     def pack_coefficients(coefficients):
-        if center_value is None:
-            free_coefficients = coefficients
-        else:
-            free_coefficients = coefficients[1:]
-        return np.concatenate([free_coefficients.real.ravel(), free_coefficients.imag.ravel()])
+        return np.concatenate([coefficients.real.ravel(), coefficients.imag.ravel()])
 
     def unpack_coefficients(packed_coefficients):
-        real_part = packed_coefficients[:free_coefficient_size].reshape(free_coefficient_shape)
-        imaginary_part = packed_coefficients[free_coefficient_size:].reshape(free_coefficient_shape)
-        free_coefficients = real_part + 1j*imaginary_part
-        if center_value is None:
-            return free_coefficients
-        coefficients = np.empty(coefficient_shape, dtype=complex)
-        coefficients[0] = center_value
-        coefficients[1:] = free_coefficients
-        return coefficients
+        real_part = packed_coefficients[:coefficient_size].reshape(coefficient_shape)
+        imaginary_part = packed_coefficients[coefficient_size:].reshape(coefficient_shape)
+        return real_part + 1j*imaginary_part
 
     def evaluate_holomorphic_factor(coefficients):
         return np.einsum("kn,nab->kab", phases, coefficients)
 
-    def relative_metric_residual(packed_coefficients):
-        candidate_eta = evaluate_holomorphic_factor(unpack_coefficients(packed_coefficients))
-        candidate_metric = np.einsum("kab,kac->kbc", candidate_eta.conj(), candidate_eta)
-        weighted_residual = np.einsum(
-            "kab,kbc,kcd->kad",
-            metric_inv_sqrt,
-            candidate_metric - metric_samples,
-            metric_inv_sqrt,
+    def boundary_unitarity_residual(packed_coefficients):
+        candidate_q = evaluate_holomorphic_factor(unpack_coefficients(packed_coefficients))
+        candidate_metric = np.einsum(
+            "kba,kbc,kcd->kad",
+            candidate_q.conj(), metric_samples, candidate_q,
         )
-        return np.concatenate([weighted_residual.real.ravel(), weighted_residual.imag.ravel()])
+        residual = candidate_metric - np.eye(matrix_size)
+        return np.concatenate([residual.real.ravel(), residual.imag.ravel()])
 
-    result = least_squares(relative_metric_residual, pack_coefficients(initial_coefficients),
+    result = least_squares(boundary_unitarity_residual, pack_coefficients(initial_coefficients),
         method="trf", max_nfev=max_nfev, x_scale="jac", ftol=1e-12, xtol=1e-12, gtol=1e-12,
     )
-    eta_coeff = unpack_coefficients(result.x)
-    return evaluate_holomorphic_factor(eta_coeff), eta_coeff
+    q_coeff = unpack_coefficients(result.x)
+    return evaluate_holomorphic_factor(q_coeff), q_coeff
 
 def evaluate_holomorphic_factor_on_disk(eta_coeff, disk_radii, sample_count):
     """ Evaluate eta on the polar disk grid. """
@@ -128,21 +115,9 @@ def evaluate_holomorphic_factor_on_disk(eta_coeff, disk_radii, sample_count):
     powers = normalized_radii[:, None, None]**modes[None, None, :] * np.exp(1j * phi[None, :, None] * modes[None, None, :])
     return np.einsum("jkn,nab->jkab", powers, eta_coeff)
 
-def hermitian_matrix_power(matrix_samples, exponent):
-    """ Apply a real power to Hermitian positive semidefinite matrix samples. """
-    powered_samples = np.empty_like(matrix_samples)
-    eigenvalue_floor = np.finfo(float).tiny
-    for sample_index, matrix in enumerate(matrix_samples):
-        hermitian_matrix = 0.5 * (matrix + matrix.conj().T)
-        eigenvalues, eigenvectors = np.linalg.eigh(hermitian_matrix)
-        if exponent < 0:
-            eigenvalues = np.maximum(eigenvalues, eigenvalue_floor)
-        else:
-            eigenvalues = np.maximum(eigenvalues, 0.0)
-        powered_samples[sample_index] = (
-            eigenvectors * (eigenvalues**exponent)[None, :]
-        ) @ eigenvectors.conj().T
-    return powered_samples
+def invert_matrix_samples(matrix_samples):
+    """ Invert a matrix-valued grid samplewise. """
+    return np.linalg.inv(matrix_samples)
 
 def multiply_by_pointwise_inverse_on_right(left_factors, right_factors):
     """ Return left_factors @ inv(right_factors) without explicitly forming inverses. """

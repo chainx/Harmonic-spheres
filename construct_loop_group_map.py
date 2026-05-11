@@ -6,6 +6,8 @@
 """
 
 import numpy as np
+from scipy.sparse import lil_matrix
+from scipy.sparse.linalg import spsolve
 
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +44,8 @@ def main():
             loop_samples = frame_grid[-1]
             gauge_fixed_loop_samples, eta = iwasawa_decompose_loop(loop_samples, rho, center_value=frame_grid[0, 0])
             gauge_fixed_frame_grid = multiply_by_pointwise_inverse_on_right(frame_grid, eta)
+            gauge_fixed_frame_grid, eta = basepoint_normalize_frame(gauge_fixed_frame_grid, eta)
+            gauge_fixed_loop_samples = gauge_fixed_frame_grid[-1]
             np.savez(RESULTS_PATH/f"bpst_JN_frame_w={DEFAULT_W}_{radial_points}-{angle_points}.npz", 
                      g=gauge_fixed_frame_grid, eta=eta, rho=rho, phi=phi, w=DEFAULT_W
             )
@@ -70,7 +74,7 @@ def solve_D_zbar_g_eq_0(A_mu, w=DEFAULT_W,
         A_mu, w, rho, phi, d_rho, d_phi, matrix_size
     )
 
-    flattened_disk_frame = np.linalg.solve(system_matrix, boundary_data)
+    flattened_disk_frame = spsolve(system_matrix.tocsc(), boundary_data)
     frame_grid = flattened_disk_frame.reshape(
         radial_points, angle_points, matrix_size, matrix_size,
     )
@@ -90,7 +94,7 @@ def build_collocation_system(A_mu, w, rho, phi, d_rho, d_phi, matrix_size):
     n_rho = rho.size
     n_phi = phi.size
     n_unknowns = n_rho * n_phi * matrix_size
-    system_matrix = np.zeros((n_unknowns, n_unknowns), dtype=complex)
+    system_matrix = lil_matrix((n_unknowns, n_unknowns), dtype=complex)
     boundary_data = np.zeros((n_unknowns, matrix_size), dtype=complex)
     next_equation = 0
 
@@ -192,6 +196,15 @@ def max_matrix_norm(matrix_list):
 def multiply_by_pointwise_inverse_on_right(left_factors, right_factors):
     """ Return left_factors @ inv(right_factors) over a matrix-valued grid. """
     return np.linalg.solve(right_factors.swapaxes(-1, -2), left_factors.swapaxes(-1, -2)).swapaxes(-1, -2)
+
+
+def basepoint_normalize_frame(frame_grid, eta=None):
+    """Normalize the final frame so g(z=1)=Id, preserving frame = raw @ inv(eta)."""
+    basepoint_value = frame_grid[-1, 0]
+    normalized_frame = frame_grid @ np.linalg.inv(basepoint_value)
+    if eta is None:
+        return normalized_frame
+    return normalized_frame, basepoint_value @ eta
 
 
 if __name__ == "__main__":
