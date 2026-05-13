@@ -33,15 +33,15 @@ from construct_loop_group_map import chebyshev_lobatto_grid, connection_zbar
 
 
 def main():
-    # A_mu = load_bpst_connection()
-    A_mu = load_sadun_segert_connection(l=4, r=-1, t=3)
+    A_mu = load_bpst_connection()
+    # A_mu = load_sadun_segert_connection(l=4, r=-5, t=3)
     residual = projector_harmonic_residual(A_mu)
     print(residual)
 
 
 
 def projector_harmonic_residual(A_mu,
-    w=DEFAULT_W, radial_points=10, angle_points=32,
+    w=DEFAULT_W, radial_points=15, angle_points=32,
     disk_radius=DISK_RADIUS, step=STEP, operator_modes=None,
 ):
     """Return || [P_+, S] || for the truncated loop multiplication operators."""
@@ -96,6 +96,13 @@ def solve_second_Θ(A_mu, w, g, Θ_alpha, rho, phi, step, alpha):
 
 def d2A_zbar(A_mu, w, rho, phi, step, alpha):
     """Second central difference of A_zbar in u or v."""
+    if hasattr(A_mu, "d2A_zbar"):
+        out = np.empty((rho.size, phi.size, *connection_zbar(A_mu, w, rho[-1]).shape), complex)
+        for j, r in enumerate(rho):
+            for k, angle in enumerate(phi):
+                out[j, k] = A_mu.d2A_zbar(w, r * np.exp(1j * angle), step, alpha)
+        return out
+
     shift = step if alpha == "u" else 1j * step
     out = np.empty((rho.size, phi.size, *connection_zbar(A_mu, w, rho[-1]).shape), complex)
     for j, r in enumerate(rho):

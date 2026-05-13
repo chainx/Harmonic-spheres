@@ -162,14 +162,14 @@ def degenerate_gauge_fix(g, g_base, primary_axis):
     else:
         raise ValueError("primary_axis must be either 0 or 2")
 
-def maurer_cartan_form(coords, step=DIFF_STEP):
+def maurer_cartan_form(coords, step=DIFF_STEP, anchor_frame=None, return_frame=False):
     """ Return (g^{-1}dg)_mu """
 
     M = s4_to_matrix(wz_to_s4(*coords))
     θ, g = extract_θ_and_g(M)
-    # Put the base frame in a deterministic reflection representative too.
-    # Otherwise separate calls to A_mu(coords) can choose different base gauges.
-    g = gauge_fix(g, np.eye(3), θ)
+    # Put the base frame in a deterministic representative.  If an anchor frame is
+    # supplied, use the same local section for a finite-difference stencil.
+    g = gauge_fix(g, np.eye(3) if anchor_frame is None else anchor_frame, θ)
 
     g_inv_dg = []
     for mu in range(4):
@@ -187,20 +187,52 @@ def maurer_cartan_form(coords, step=DIFF_STEP):
         g_minus = gauge_fix(g_minus, g, θ)
         g_inv_dg.append( ( g.T @ (g_plus - g_minus) ) / (2*step) )
 
+    if return_frame:
+        return g_inv_dg, θ, g
     return g_inv_dg, θ
 
 def extract_basis_vector_coeff(lie_alg_matrix):
     return [-np.trace(lie_alg_matrix @ T[i])/2 for i in range(3)]
 
 def connection_in_wz_coords(a3, step=DIFF_STEP):
-    def A_mu(coords):
-        g_inv_dg, θ = maurer_cartan_form(coords, step)
+    def A_mu(coords, anchor_frame=None):
+        g_inv_dg, θ = maurer_cartan_form(coords, step, anchor_frame)
         a = [a3(θ - 2*π/3), a3(θ + 2*π/3), a3(θ)]
         A = []
         for mu in range(4):
             coeff = extract_basis_vector_coeff(g_inv_dg[mu])
             A.append( -sum([coeff[i] * a[i] * S[i] for i in range(3)]) )
         return A
+
+    def frame_at(coords):
+        return maurer_cartan_form(coords, step, return_frame=True)[2]
+
+    def zbar_at(coords, anchor_frame=None):
+        A = A_mu(coords, anchor_frame)
+        return 0.5 * (np.asarray(A[2]) + 1j*np.asarray(A[3]))
+
+    def d_zbar_at(w, z, derivative_step, alpha):
+        shift = derivative_step if alpha == "u" else 1j * derivative_step
+        center = [w.real, w.imag, z.real, z.imag]
+        anchor = frame_at(center)
+        plus = [w.real + shift.real, w.imag + shift.imag, z.real, z.imag]
+        minus = [w.real - shift.real, w.imag - shift.imag, z.real, z.imag]
+        return (zbar_at(plus, anchor) - zbar_at(minus, anchor)) / (2.0 * derivative_step)
+
+    def d2_zbar_at(w, z, derivative_step, alpha):
+        shift = derivative_step if alpha == "u" else 1j * derivative_step
+        center = [w.real, w.imag, z.real, z.imag]
+        anchor = frame_at(center)
+        plus = [w.real + shift.real, w.imag + shift.imag, z.real, z.imag]
+        minus = [w.real - shift.real, w.imag - shift.imag, z.real, z.imag]
+        return (
+            zbar_at(plus, anchor)
+            - 2.0 * zbar_at(center, anchor)
+            + zbar_at(minus, anchor)
+        ) / derivative_step**2
+
+    A_mu.dA_zbar = d_zbar_at
+    A_mu.d2A_zbar = d2_zbar_at
     return A_mu
 
 

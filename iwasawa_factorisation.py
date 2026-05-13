@@ -3,6 +3,7 @@ from scipy.optimize import least_squares
 
 MODE_COUNT = 127 # The number of positive (and negative) Fourier modes to keep for the Toeplitz matrix truncation
 REFINEMENT_MAX_NFEV = 80 # Maximum number of residual evaluations used by the nonlinear least-squares inverse-factor refinement.
+RETRY_MAX_UNITARITY_RESIDUAL = 1.0
 
 def main():
     saved_frame = np.load("results/jarvis_norbury_large_frame.npz")
@@ -21,17 +22,52 @@ def iwasawa_decompose_loop(loop_samples, disk_radii, refinement_max_nfev=REFINEM
             -eta whose inverse is solved for holomorphically on the full disk grid.
     """
     sample_count, matrix_size, _ = loop_samples.shape
-    if not mode_count: mode_count = sample_count//2 - 1
+    max_mode_count = sample_count//2 - 1
+    use_adaptive_mode = mode_count is None
+    if mode_count is None:
+        mode_count = max_mode_count
     
     metric_samples = np.einsum("kab,kac->kbc", loop_samples.conj(), loop_samples) # compute H = g^\dagger g
+    candidates = [mode_count] if not use_adaptive_mode else fallback_mode_counts(max_mode_count)
+    best = None
+
+    for candidate_mode_count in candidates:
+        candidate = factor_loop_with_mode_count(
+            loop_samples, metric_samples, disk_radii,
+            candidate_mode_count, refinement_max_nfev,
+        )
+        if best is None or candidate[2] < best[2]:
+            best = candidate
+        if candidate[2] <= RETRY_MAX_UNITARITY_RESIDUAL:
+            break
+
+    g, eta = best[:2]
+    return g, eta
+
+def fallback_mode_counts(max_mode_count):
+    """Try the Nyquist-adjacent mode first, then back away if it is unstable."""
+    offsets = [0, 1, 2, 4, 6, 8]
+    return [max_mode_count - offset for offset in offsets if max_mode_count - offset >= 0]
+
+def factor_loop_with_mode_count(loop_samples, metric_samples, disk_radii, mode_count, max_nfev):
+    sample_count, matrix_size, _ = loop_samples.shape
     toeplitz_matrix = construct_truncated_toeplitz_matrix(metric_samples, mode_count, sample_count, matrix_size)
     cholesky_matrix = np.linalg.cholesky(toeplitz_matrix)
     boundary_eta, _ = extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size)
     boundary_q, q_coeff = refine_inverse_holomorphic_factor(
-        invert_matrix_samples(boundary_eta), metric_samples, mode_count, refinement_max_nfev,
+        invert_matrix_samples(boundary_eta), metric_samples, mode_count, max_nfev,
     )
     g = np.einsum("kab,kbc->kac", loop_samples, boundary_q)
-    return g, invert_matrix_samples(evaluate_holomorphic_factor_on_disk(q_coeff, disk_radii, sample_count))
+    eta = invert_matrix_samples(evaluate_holomorphic_factor_on_disk(q_coeff, disk_radii, sample_count))
+    return g, eta, max_boundary_unitarity_residual(g)
+
+def max_boundary_unitarity_residual(g):
+    return np.max(boundary_unitarity_residuals(g))
+
+def boundary_unitarity_residuals(g):
+    matrix_size = g.shape[-1]
+    metric = np.einsum("kab,kac->kbc", g.conj(), g)
+    return np.linalg.norm(metric - np.eye(matrix_size), axis=(1, 2))
 
 def construct_truncated_toeplitz_matrix(loop_samples, mode_count, sample_count, matrix_size):
     """ Constructs (mode_count+1)x(mode_count+1) Toepliz matrix from the sampled loop group map values. """

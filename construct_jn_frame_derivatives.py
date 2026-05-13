@@ -63,6 +63,13 @@ def solve_Θ(A_mu, w, g, rho, phi, step, alpha):
 
 def dA_zbar(A_mu, w, rho, phi, step, alpha):
     """Central finite difference for d_u A_zbar or d_v A_zbar."""
+    if hasattr(A_mu, "dA_zbar"):
+        out = np.empty((rho.size, phi.size, *connection_zbar(A_mu, w, rho[-1]).shape), complex)
+        for j, r in enumerate(rho):
+            for k, angle in enumerate(phi):
+                out[j, k] = A_mu.dA_zbar(w, r * np.exp(1j * angle), step, alpha)
+        return out
+
     shift = SPHERE_SHIFTS[alpha] * step
     out = np.empty((rho.size, phi.size, *connection_zbar(A_mu, w, rho[-1]).shape), complex)
     for j, r in enumerate(rho):
