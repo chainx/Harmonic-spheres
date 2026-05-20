@@ -1,182 +1,120 @@
 import numpy as np
 from scipy.optimize import least_squares
 
-MODE_COUNT = 127 # The number of positive (and negative) Fourier modes to keep for the Toeplitz matrix truncation
+from disk_solve import boundary_unitarity_residuals, basepoint_normalize_frame, timer
+
 REFINEMENT_MAX_NFEV = 80 # Maximum number of residual evaluations used by the nonlinear least-squares inverse-factor refinement.
-RETRY_MAX_UNITARITY_RESIDUAL = 1.0
+RETRY_MAX_UNITARITY_RESIDUAL = 1e-5
 
-def main():
-    saved_frame = np.load("results/jarvis_norbury_large_frame.npz")
-    loop_samples = saved_frame["boundary_frame"]
-    center_value = saved_frame["frame_grid"][0, 0]
-    g, eta = iwasawa_decompose_loop(loop_samples, saved_frame["rho"], center_value=center_value, refinement_max_nfev=REFINEMENT_MAX_NFEV)
-    verify_g_unitary_at_boundary(g, avg_tol=1e-1, max_tol=1e-1)
+class iwasawa_factorise:
+    def __init__(self, disk_frame, disk_grid, refinement_max_nfev=REFINEMENT_MAX_NFEV):
+        self.verbose = False
+
+        self.disk_frame = disk_frame
+        self.boundary_frame = disk_frame[-1]
+        self.disk_grid = disk_grid
+        self.refinement_max_nfev = refinement_max_nfev
+        self.sample_count, self.matrix_size, _ = self.boundary_frame.shape
+
+        # compute H := γ^\dagger γ and H^{-1}
+        self.metric_samples = self.boundary_frame.conj().swapaxes(-1, -2) @ self.boundary_frame
+        self.inv_metric_samples = np.linalg.inv(self.metric_samples)
 
 
-# =============================================================================================
+    def iwasawa_factorise_loop(self):
+        """ Factorise loop group element γ into:
+                -g which is unitary at the boundary,
+                -η whose inverse is solved for holomorphically on the full disk grid.
+            so γ = gη.
+        """
+        mode_count, η_inv_coef = self.find_optimal_mode_count()
+        η_inv_coef = self.refine_η_inv(η_inv_coef)
+        
+        η_inv = self.extend_η_inv_to_disk(η_inv_coef)
 
+        gauge_fixed_disk_frame = self.disk_frame @ η_inv
+        gauge_fixed_disk_frame, η_inv = basepoint_normalize_frame(gauge_fixed_disk_frame, η_inv)
 
-def iwasawa_decompose_loop(loop_samples, disk_radii, refinement_max_nfev=REFINEMENT_MAX_NFEV, center_value=None, mode_count=None):
-    """ Decompose loop group element into:
-            -g which is unitary at the boundary,
-            -eta whose inverse is solved for holomorphically on the full disk grid.
-    """
-    sample_count, matrix_size, _ = loop_samples.shape
-    max_mode_count = sample_count//2 - 1
-    use_adaptive_mode = mode_count is None
-    if mode_count is None:
-        mode_count = max_mode_count
-    
-    metric_samples = np.einsum("kab,kac->kbc", loop_samples.conj(), loop_samples) # compute H = g^\dagger g
-    candidates = [mode_count] if not use_adaptive_mode else fallback_mode_counts(max_mode_count)
-    best = None
+        return gauge_fixed_disk_frame, η_inv, boundary_unitarity_residuals(gauge_fixed_disk_frame[-1])
 
-    for candidate_mode_count in candidates:
-        candidate = factor_loop_with_mode_count(
-            loop_samples, metric_samples, disk_radii,
-            candidate_mode_count, refinement_max_nfev,
+    def find_optimal_mode_count(self):
+        max_mode_count = self.sample_count//2 - 1
+        best_mode_count, best_η_inv_coef, best_residual = None, None, 1e10
+        for mode_count in range(1, max_mode_count):
+            boundary_η_inv, η_inv_coef = self.toeplitz_cholesky_factorisation(mode_count)
+            new_boundary_frame = self.boundary_frame @ boundary_η_inv
+            residual = boundary_unitarity_residuals(new_boundary_frame)["avg_unitarity_residual"]
+            if residual < best_residual:
+                best_mode_count = mode_count; best_η_inv_coef = η_inv_coef; best_residual = residual
+        if self.verbose: print(f"Max mode count: {max_mode_count}. Best mode count: {best_mode_count}")
+        return best_mode_count, best_η_inv_coef
+
+    def toeplitz_cholesky_factorisation(self, mode_count):
+        toeplitz_matrix = self.construct_truncated_toeplitz_matrix(mode_count)
+        cholesky_matrix = np.linalg.cholesky(toeplitz_matrix) # T(H^{-1}) = L L^\dagger
+        η_inv_coef = self.extract_η_inv_coef(cholesky_matrix)
+        boundary_η_inv = self.evaluate_η_inv_on_boundary(η_inv_coef)
+        return boundary_η_inv, η_inv_coef
+
+    def construct_truncated_toeplitz_matrix(self, mode_count):
+        """Constructs (mode_count+1)x(mode_count+1) Toepliz matrix from the sampled loop group map values."""
+        fourier_coef = self.extract_inv_metric_fourier_coefficients(mode_count)
+
+        block_count = mode_count + 1
+        toeplitz_matrix = np.zeros((block_count * self.matrix_size, block_count * self.matrix_size), dtype=complex)
+        for i in range(block_count):
+            row = slice(i * self.matrix_size, (i + 1) * self.matrix_size)
+            for j in range(block_count):
+                col = slice(j * self.matrix_size, (j + 1) * self.matrix_size)
+                toeplitz_matrix[row, col] = fourier_coef[i - j + mode_count]
+
+        return toeplitz_matrix
+
+    def extract_inv_metric_fourier_coefficients(self, mode_count):
+        """Returns first mode_count +ve and -ve Taylor coefficients (which are matrices) of H^{-1}."""
+        fourier_coef = np.fft.fft(self.inv_metric_samples, axis=0) / self.sample_count
+        return np.concatenate((fourier_coef[-mode_count:], fourier_coef[:mode_count+1]))
+
+    def extract_η_inv_coef(self, cholesky_matrix):
+        """Extract coefficients of η^{-1} from a Toeplitz Cholesky factor."""
+        block_count = cholesky_matrix.shape[0] // self.matrix_size
+        last_block_row = slice((block_count - 1) * self.matrix_size, block_count * self.matrix_size)
+        
+        η_inv_coeff = np.empty((block_count, self.matrix_size, self.matrix_size), dtype=complex)
+        for mode in range(block_count):
+            col = slice((block_count - 1 - mode) * self.matrix_size, (block_count - mode) * self.matrix_size)
+            η_inv_coeff[mode] = cholesky_matrix[last_block_row, col]
+
+        return η_inv_coeff
+
+    def evaluate_η_inv_on_boundary(self, η_inv_coef):
+        """ Evaluate η^{-1} on the boundary circle. """
+        modes = np.arange(η_inv_coef.shape[0])
+        phi = np.linspace(0.0, 2.0*np.pi, self.sample_count, endpoint=False)
+        phases = np.exp(1j * phi[:, None] * modes[None, :])
+        return np.einsum("kn,nab->kab", phases, η_inv_coef)
+
+    def extend_η_inv_to_disk(self, η_inv_coef):
+        """ Evaluate η^{-1} on the polar disk grid. """
+        modes = np.arange(η_inv_coef.shape[0]) # [0,1,2,3, ... ,mode_count]
+        phi = np.linspace(0.0, 2.0*np.pi, self.sample_count, endpoint=False)
+        normalized_radii = self.disk_grid / self.disk_grid[-1]
+        z = normalized_radii[:, None] * np.exp(1j * phi[None, :])
+        z_powers = z[:, :, None] ** modes[None, None, :]
+        return np.einsum("jkn,nab->jkab", z_powers, η_inv_coef)
+
+    def refine_η_inv(self, η_inv_coef):
+        """ Minimize the boundary unitarity residual over holomorphic Fourier coefficients. """
+        η_inv_coef = np.ascontiguousarray(η_inv_coef, dtype=complex)
+
+        def boundary_unitarity_residual(real_coefficients):
+            candidate_η_inv_coef = real_coefficients.view(complex).reshape(η_inv_coef.shape)
+            candidate_η_inv = self.evaluate_η_inv_on_boundary(candidate_η_inv_coef)
+            return boundary_unitarity_residuals(self.boundary_frame @ candidate_η_inv, flatten_for_optimizer=True)
+
+        initial_coefficients = η_inv_coef.view(float).ravel()
+
+        result = least_squares(boundary_unitarity_residual, initial_coefficients,
+            method="trf", max_nfev=self.refinement_max_nfev, x_scale="jac", ftol=1e-12, xtol=1e-12, gtol=1e-12,
         )
-        if best is None or candidate[2] < best[2]:
-            best = candidate
-        if candidate[2] <= RETRY_MAX_UNITARITY_RESIDUAL:
-            break
-
-    g, eta = best[:2]
-    return g, eta
-
-def fallback_mode_counts(max_mode_count):
-    """Try the Nyquist-adjacent mode first, then back away if it is unstable."""
-    offsets = [0, 1, 2, 4, 6, 8]
-    return [max_mode_count - offset for offset in offsets if max_mode_count - offset >= 0]
-
-def factor_loop_with_mode_count(loop_samples, metric_samples, disk_radii, mode_count, max_nfev):
-    sample_count, matrix_size, _ = loop_samples.shape
-    toeplitz_matrix = construct_truncated_toeplitz_matrix(metric_samples, mode_count, sample_count, matrix_size)
-    cholesky_matrix = np.linalg.cholesky(toeplitz_matrix)
-    boundary_eta, _ = extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size)
-    boundary_q, q_coeff = refine_inverse_holomorphic_factor(
-        invert_matrix_samples(boundary_eta), metric_samples, mode_count, max_nfev,
-    )
-    g = np.einsum("kab,kbc->kac", loop_samples, boundary_q)
-    eta = invert_matrix_samples(evaluate_holomorphic_factor_on_disk(q_coeff, disk_radii, sample_count))
-    return g, eta, max_boundary_unitarity_residual(g)
-
-def max_boundary_unitarity_residual(g):
-    return np.max(boundary_unitarity_residuals(g))
-
-def boundary_unitarity_residuals(g):
-    matrix_size = g.shape[-1]
-    metric = np.einsum("kab,kac->kbc", g.conj(), g)
-    return np.linalg.norm(metric - np.eye(matrix_size), axis=(1, 2))
-
-def construct_truncated_toeplitz_matrix(loop_samples, mode_count, sample_count, matrix_size):
-    """ Constructs (mode_count+1)x(mode_count+1) Toepliz matrix from the sampled loop group map values. """
-    fourier_coef = extract_fourier_coefficients(loop_samples, mode_count, sample_count)
-    block_count = mode_count + 1
-    toeplitz_matrix = np.zeros((block_count * matrix_size, block_count * matrix_size), dtype=complex)
-    for i in range(block_count):
-        row = slice(i * matrix_size, (i + 1) * matrix_size)
-        for j in range(block_count):
-            col = slice(j * matrix_size, (j + 1) * matrix_size)
-            toeplitz_matrix[row, col] = fourier_coef[i - j + mode_count]
-
-    return toeplitz_matrix
-
-def extract_fourier_coefficients(loop_samples, mode_count, sample_count):
-    """ Returns first mode_count +ve and -ve Taylor coefficients (which are matrices) of the sampled analytic loop. """
-    if mode_count >= sample_count // 2:
-        raise ValueError(
-            f"mode_count must be less than {sample_count // 2} for {sample_count} samples"
-        )
-    fourier_coef = np.fft.fft(loop_samples, axis=0) / sample_count
-    return np.concatenate((fourier_coef[-mode_count:], fourier_coef[:mode_count+1]))
-
-def extract_holomorphic_factor(cholesky_matrix, sample_count, matrix_size):
-    """ Extract boundary value of holomorphic matrix-valued function eta from a Toeplitz Cholesky factor. """
-    block_count = cholesky_matrix.shape[0] // matrix_size
-    last_block_row = slice((block_count - 1) * matrix_size, block_count * matrix_size)
-    eta_coeff = np.empty((block_count, matrix_size, matrix_size), dtype=complex)
-
-    for mode in range(block_count):
-        col = slice((block_count - 1 - mode) * matrix_size, (block_count - mode) * matrix_size)
-        eta_coeff[mode] = cholesky_matrix[last_block_row, col]
-
-    modes = np.arange(eta_coeff.shape[0])
-    phi = np.linspace(0.0, 2.0*np.pi, sample_count, endpoint=False)
-    phases = np.exp(1j * phi[:, None] * modes[None, :])
-    return np.einsum("kn,nab->kab", phases, eta_coeff), eta_coeff
-
-def refine_inverse_holomorphic_factor(q, metric_samples, mode_count, max_nfev):
-    """ Minimize the boundary unitarity residual over holomorphic Fourier coefficients. """
-    sample_count, matrix_size, _ = q.shape
-    coefficient_shape = (mode_count + 1, matrix_size, matrix_size)
-    modes = np.arange(mode_count + 1)
-    phi = np.linspace(0.0, 2.0*np.pi, sample_count, endpoint=False)
-    phases = np.exp(1j * phi[:, None] * modes[None, :])
-
-    initial_coefficients = np.fft.fft(q, axis=0)[:mode_count + 1] / sample_count
-    coefficient_size = np.prod(coefficient_shape)
-
-    def pack_coefficients(coefficients):
-        return np.concatenate([coefficients.real.ravel(), coefficients.imag.ravel()])
-
-    def unpack_coefficients(packed_coefficients):
-        real_part = packed_coefficients[:coefficient_size].reshape(coefficient_shape)
-        imaginary_part = packed_coefficients[coefficient_size:].reshape(coefficient_shape)
-        return real_part + 1j*imaginary_part
-
-    def evaluate_holomorphic_factor(coefficients):
-        return np.einsum("kn,nab->kab", phases, coefficients)
-
-    def boundary_unitarity_residual(packed_coefficients):
-        candidate_q = evaluate_holomorphic_factor(unpack_coefficients(packed_coefficients))
-        candidate_metric = np.einsum(
-            "kba,kbc,kcd->kad",
-            candidate_q.conj(), metric_samples, candidate_q,
-        )
-        residual = candidate_metric - np.eye(matrix_size)
-        return np.concatenate([residual.real.ravel(), residual.imag.ravel()])
-
-    result = least_squares(boundary_unitarity_residual, pack_coefficients(initial_coefficients),
-        method="trf", max_nfev=max_nfev, x_scale="jac", ftol=1e-12, xtol=1e-12, gtol=1e-12,
-    )
-    q_coeff = unpack_coefficients(result.x)
-    return evaluate_holomorphic_factor(q_coeff), q_coeff
-
-def evaluate_holomorphic_factor_on_disk(eta_coeff, disk_radii, sample_count):
-    """ Evaluate eta on the polar disk grid. """
-    modes = np.arange(eta_coeff.shape[0])
-    phi = np.linspace(0.0, 2.0*np.pi, sample_count, endpoint=False)
-    normalized_radii = disk_radii / disk_radii[-1]
-    powers = normalized_radii[:, None, None]**modes[None, None, :] * np.exp(1j * phi[None, :, None] * modes[None, None, :])
-    return np.einsum("jkn,nab->jkab", powers, eta_coeff)
-
-def invert_matrix_samples(matrix_samples):
-    """ Invert a matrix-valued grid samplewise. """
-    return np.linalg.inv(matrix_samples)
-
-def multiply_by_pointwise_inverse_on_right(left_factors, right_factors):
-    """ Return left_factors @ inv(right_factors) without explicitly forming inverses. """
-    product = np.empty_like(left_factors)
-    for sample_index, (left_factor, right_factor) in enumerate(zip(left_factors, right_factors)):
-        product[sample_index] = np.linalg.solve(right_factor.T, left_factor.T).T
-    return product
-
-def verify_g_unitary_at_boundary(g, avg_tol, max_tol):
-    """ Check the average and max Frobenius norms of the residuals g g^\dagger - I. """
-    matrix_size = g.shape[-1]
-    metric = np.einsum("kab,kac->kbc", g.conj(), g)
-    residuals = np.linalg.norm(metric - np.eye(matrix_size), axis=(1, 2))
-    avg_residual = np.mean(residuals)
-    max_residual = np.max(residuals)
-
-    print(f"average boundary unitarity residual = {avg_residual:.6e}")
-    print(f"max boundary unitarity residual = {max_residual:.6e}")
-    return avg_residual < avg_tol and max_residual < max_tol
-
-
-# =============================================================================================
-
-
-if __name__ == "__main__":
-    main()
+        return result.x.view(complex).reshape(η_inv_coef.shape).copy()
