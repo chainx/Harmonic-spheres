@@ -26,33 +26,34 @@ from construct_bpst_in_wz_coords import load_bpst_connection
 from construct_sadun_segert_in_wz_coords import load_sadun_segert_connection
 
 from construct_jn_frame_derivatives import (
-    DEFAULT_W, DISK_RADIUS, STEP,
-    compute_jn_frame_derivatives, dA_zbar, solve_dbar,
+    DEFAULT_W, DISK_RADIUS, STEP, JN_derivatives,
 )
-from construct_loop_group_map import chebyshev_lobatto_grid, connection_zbar
-
 
 def main():
-    A_mu = load_bpst_connection()
-    # A_mu = load_sadun_segert_connection(l=4, r=-5, t=3)
+    # A_mu = load_bpst_connection()
+    A_mu = load_sadun_segert_connection(l=4, r=-5, t=3)
     residual = projector_harmonic_residual(A_mu)
     print(residual)
 
 
 
 def projector_harmonic_residual(A_mu,
-    w=DEFAULT_W, radial_points=15, angle_points=32,
+    w=DEFAULT_W, radial_points=16, angle_points=100,
     disk_radius=DISK_RADIUS, step=STEP, operator_modes=None,
+    iwasawa_mode_count=None,
 ):
     """Return || [P_+, S] || for the truncated loop multiplication operators."""
 
-    rho = chebyshev_lobatto_grid(disk_radius, radial_points)[0]
-    phi = np.linspace(0.0, 2.0 * np.pi, angle_points, endpoint=False)
-    g, _, Θ = compute_jn_frame_derivatives(
-        A_mu, w, disk_radius, radial_points, angle_points, step
+    derivative_solver = JN_derivatives(
+        A_mu,
+        radial_points=radial_points,
+        angular_points=angle_points,
+        disk_radius=disk_radius,
+        step=step,
     )
-    Θ_uu = solve_second_Θ(A_mu, w, g, Θ["u"], rho, phi, step, "u")
-    Θ_vv = solve_second_Θ(A_mu, w, g, Θ["v"], rho, phi, step, "v")
+    g, _, Θ = derivative_solver.compute_jn_frame_derivatives(w)
+    Θ_uu = derivative_solver.solve_second_Θ(w, g, Θ["u"], "u")
+    Θ_vv = derivative_solver.solve_second_Θ(w, g, Θ["v"], "v")
 
     Θ_u, Θ_v, dΘ_trace = Θ["u"][-1], Θ["v"][-1], Θ_uu[-1] + Θ_vv[-1]
 
@@ -78,42 +79,6 @@ def projector_harmonic_residual(A_mu,
         "absolute": float(absolute),
         "relative": float(absolute / scale),
     }
-
-def solve_second_Θ(A_mu, w, g, Θ_alpha, rho, phi, step, alpha):
-    """Solve partial_a Θ_a by differentiating the dbar problem."""
-    d_alpha_A_zbar = dA_zbar(A_mu, w, rho, phi, step, alpha)
-    conjugated_d_alpha_A_zbar = np.linalg.solve(g, d_alpha_A_zbar @ g)
-    conjugated_d2_alpha_A_zbar = np.linalg.solve(
-        g, d2A_zbar(A_mu, w, rho, phi, step, alpha) @ g
-    )
-    source = (
-        Θ_alpha @ conjugated_d_alpha_A_zbar
-        - conjugated_d_alpha_A_zbar @ Θ_alpha
-        - conjugated_d2_alpha_A_zbar
-    )
-    return solve_dbar(source, rho, phi)
-
-
-def d2A_zbar(A_mu, w, rho, phi, step, alpha):
-    """Second central difference of A_zbar in u or v."""
-    if hasattr(A_mu, "d2A_zbar"):
-        out = np.empty((rho.size, phi.size, *connection_zbar(A_mu, w, rho[-1]).shape), complex)
-        for j, r in enumerate(rho):
-            for k, angle in enumerate(phi):
-                out[j, k] = A_mu.d2A_zbar(w, r * np.exp(1j * angle), step, alpha)
-        return out
-
-    shift = step if alpha == "u" else 1j * step
-    out = np.empty((rho.size, phi.size, *connection_zbar(A_mu, w, rho[-1]).shape), complex)
-    for j, r in enumerate(rho):
-        for k, angle in enumerate(phi):
-            z = r * np.exp(1j * angle)
-            out[j, k] = (
-                connection_zbar(A_mu, w + shift, z)
-                - 2.0 * connection_zbar(A_mu, w, z)
-                + connection_zbar(A_mu, w - shift, z)
-            ) / step**2
-    return out
 
 def multiplication_operator(samples, mode_radius):
     """Matrix for truncated multiplication by a matrix-valued loop."""

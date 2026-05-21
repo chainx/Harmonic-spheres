@@ -19,7 +19,9 @@ class disk_solver:
         self.angular_deriv = self.fourier_differentiation_matrix()
 
         self.A_mu = A_mu
-        self.matrix_size = A_mu([0,0,0,0])[0].shape[0]
+        self.matrix_size = getattr(A_mu, "matrix_size", None)
+        if self.matrix_size is None:
+            self.matrix_size = A_mu([0.2, 0.3, 0.1, 0.0])[0].shape[0]
 
     def chebyshev_lobatto_grid(self):
         """Returns Chebyshev-Lobatto grid for the interval [0, width],
@@ -60,6 +62,8 @@ class disk_solver:
 
 
     def connection_zbar(self, w, z):
+        if hasattr(self.A_mu, "zbar_at"):
+            return self.A_mu.zbar_at(w, z)
         coords = [w.real, w.imag, z.real, z.imag]
         A = self.A_mu(coords)
         return 0.5 * (np.asarray(A[2]) + 1j*np.asarray(A[3]))

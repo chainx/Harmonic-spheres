@@ -16,8 +16,8 @@ from disk_solve import disk_solver, timer
 from iwasawa_factorisation import iwasawa_factorise
 
 def main():
-    A_mu = load_bpst_connection()
-    # A_mu = load_sadun_segert_connection(l=4, r=-5, t=3)
+    # A_mu = load_bpst_connection()
+    A_mu = load_sadun_segert_connection(l=4, r=-5, t=3)
     disk_frame, η_inv = JN_frame_solver(A_mu).construct_JN_frame(w=0.2 + 0.3j)
 
 class JN_frame_solver(disk_solver):
@@ -29,7 +29,7 @@ class JN_frame_solver(disk_solver):
 
         gauge_fixed_disk_frame, η_inv, unitarity_residuals = iwasawa_factorise(disk_frame, self.radial_grid).iwasawa_factorise_loop()
         print("JN frame constructed!\n", unitarity_residuals)
-        print(self.PDE_residual(gauge_fixed_disk_frame, system_matrix, boundary_data))
+        print(self.holomorphic_gauge_PDE_residual(disk_frame, η_inv, system_matrix, boundary_data))
         return gauge_fixed_disk_frame, η_inv
 
     @timer
@@ -104,6 +104,43 @@ class JN_frame_solver(disk_solver):
             self.radial_points * self.angular_points * self.matrix_size, self.matrix_size,
         )
         residual = system_matrix @ flattened_disk_frame - boundary_data
+        return {
+            "max_PDE_residual": np.max(np.abs(residual)),
+            "frobenius_PDE_residual": np.linalg.norm(residual),
+        }
+
+    def holomorphic_gauge_PDE_residual(self, disk_frame, η_inv, system_matrix, boundary_data):
+        """PDE residual after multiplying by the holomorphic Iwasawa factor.
+
+        The collocation differentiation matrices do not satisfy an exact product
+        rule for a numerically solved frame times a high-mode holomorphic factor.
+        This diagnostic uses D_zbar(η_inv)=0 analytically and applies the raw PDE
+        residual to the holomorphic factor pointwise.
+        """
+        flattened_disk_frame = disk_frame.reshape(
+            self.radial_points * self.angular_points * self.matrix_size, self.matrix_size,
+        )
+        raw_residual = system_matrix @ flattened_disk_frame - boundary_data
+        residual = np.zeros_like(raw_residual)
+        next_equation = 0
+
+        for j in range(1, self.radial_points):
+            for k in range(self.angular_points):
+                equation_rows = slice(next_equation, next_equation + self.matrix_size)
+                residual[equation_rows] = raw_residual[equation_rows] @ η_inv[j, k]
+                next_equation += self.matrix_size
+
+        gauge_fixed_disk_frame = disk_frame @ η_inv
+        for k in range(1, self.angular_points):
+            equation_rows = slice(next_equation, next_equation + self.matrix_size)
+            residual[equation_rows] = gauge_fixed_disk_frame[0, k] - gauge_fixed_disk_frame[0, 0]
+            next_equation += self.matrix_size
+
+        equation_rows = slice(next_equation, next_equation + self.matrix_size)
+        residual[equation_rows] = gauge_fixed_disk_frame[-1, 0] - np.eye(self.matrix_size)
+        next_equation += self.matrix_size
+
+        assert next_equation == self.radial_points * self.angular_points * self.matrix_size
         return {
             "max_PDE_residual": np.max(np.abs(residual)),
             "frobenius_PDE_residual": np.linalg.norm(residual),
